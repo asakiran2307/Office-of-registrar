@@ -5843,67 +5843,100 @@
         }
       }
 
+      function parseStoredRecord(raw, fallback = {}) {
+        if (raw && typeof raw === 'object') return { ...fallback, ...raw };
+        if (typeof raw === 'string' && raw.trim()) {
+          try { return { ...fallback, ...JSON.parse(raw) }; } catch (_) { }
+        }
+        return { ...fallback };
+      }
+
+      function mergeRegisterRecords(...groups) {
+        const merged = new Map();
+        groups.flatMap(group => Array.isArray(group) ? group : []).forEach((item, index) => {
+          if (!item || typeof item !== 'object') return;
+          const key = String(item.id || item.refNo || `legacy-${index}`);
+          const previous = merged.get(key) || {};
+          merged.set(key, { ...previous, ...item });
+        });
+        return Array.from(merged.values());
+      }
+
       async function pullCloudToLocal(showToastAlert = true) {
         try {
           updateStatusUI('syncing');
-          const rows = await executeSql("SELECT payload, updated_at FROM ju_sync_state WHERE sync_key = 'master_register_state';");
-          if (rows && rows.length > 0 && rows[0].payload) {
-            const cloudPayload = rows[0].payload;
-            
-            if (cloudPayload.departments && cloudPayload.departments.length) {
-              state.departments = cloudPayload.departments;
-            }
-            if (cloudPayload.docTypes && cloudPayload.docTypes.length) {
-              state.docTypes = cloudPayload.docTypes;
-            }
-            if (cloudPayload.sections && cloudPayload.sections.length) {
-              state.sections = cloudPayload.sections;
-            }
+          const snapshotRows = await executeSql("SELECT payload, updated_at FROM ju_sync_state WHERE sync_key = 'master_register_state';");
+          const cloudPayload = snapshotRows?.[0]?.payload || {};
+          const [outRows, inRows, fileRows] = await Promise.all([
+            executeSql("SELECT id, sl_no, ref_no, date, sent_to, department, dept_code, doc_type, doc_code, subject, mode, prepared_by, approved_by, status, remarks, amount, body, to_recipients, copy_to_recipients, title_banner, table_data, raw_data FROM ju_outward ORDER BY updated_at DESC;"),
+            executeSql("SELECT id, sl_no, ref_no, date, received_from, department, dept_code, doc_type, doc_code, subject, mode, received_by, remarks, amount, status, raw_data FROM ju_inward ORDER BY updated_at DESC;"),
+            executeSql("SELECT id, sl_no, ref_no, cat_code, sub_code, category_name, title, custodian, year, location, digital_link, retention, confidentiality, compliance, description, status, created_by, raw_data FROM ju_files ORDER BY updated_at DESC;")
+          ]);
 
-            if (Array.isArray(cloudPayload.inwardData)) {
-              state.inwardData = cloudPayload.inwardData.map((item, i) => ({ ...item, slNo: i + 1 }));
-            }
+          if (cloudPayload.departments?.length) state.departments = cloudPayload.departments;
+          if (cloudPayload.docTypes?.length) state.docTypes = cloudPayload.docTypes;
+          if (cloudPayload.sections?.length) state.sections = cloudPayload.sections;
 
-            if (Array.isArray(cloudPayload.outwardData)) {
-              state.outwardData = cloudPayload.outwardData.map((item, i) => ({ ...item, slNo: i + 1 }));
-            }
+          const dbOut = outRows.map(row => parseStoredRecord(row.raw_data, {
+            id: row.id, slNo: row.sl_no, refNo: row.ref_no, date: row.date,
+            sentTo: row.sent_to, department: row.department, deptCode: row.dept_code,
+            docType: row.doc_type, docCode: row.doc_code, subject: row.subject,
+            mode: row.mode, preparedBy: row.prepared_by, approvedBy: row.approved_by,
+            status: row.status, remarks: row.remarks, amount: row.amount,
+            body: row.body, to: row.to_recipients, copyTo: row.copy_to_recipients,
+            titleBanner: row.title_banner, tableData: row.table_data
+          }));
+          const dbIn = inRows.map(row => parseStoredRecord(row.raw_data, {
+            id: row.id, slNo: row.sl_no, refNo: row.ref_no, date: row.date,
+            receivedFrom: row.received_from, department: row.department, deptCode: row.dept_code,
+            docType: row.doc_type, docCode: row.doc_code, subject: row.subject,
+            mode: row.mode, receivedBy: row.received_by, remarks: row.remarks,
+            amount: row.amount, status: row.status
+          }));
+          const dbFiles = fileRows.map(row => parseStoredRecord(row.raw_data, {
+            id: row.id, slNo: row.sl_no, refNo: row.ref_no, catCode: row.cat_code,
+            subCode: row.sub_code, categoryName: row.category_name, title: row.title,
+            custodian: row.custodian, year: row.year, location: row.location,
+            digitalLink: row.digital_link, retention: row.retention,
+            confidentiality: row.confidentiality, compliance: row.compliance,
+            desc: row.description, status: row.status, createdBy: row.created_by
+          }));
 
-            if (Array.isArray(cloudPayload.filesData)) {
-              state.filesData = cloudPayload.filesData.map((item, i) => ({ ...item, slNo: i + 1 }));
-            }
+          // Union the browser cache, JSON snapshot, and normalized tables. The previous
+          // implementation replaced the entire register with the snapshot, hiding rows
+          // saved to the tables but missing from the snapshot.
+          const local = (() => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch (_) { return {}; } })();
+          state.inwardData = mergeRegisterRecords(local.inwardData, cloudPayload.inwardData, dbIn)
+            .map((item, i) => ({ ...item, slNo: i + 1 }));
+          state.outwardData = mergeRegisterRecords(local.outwardData, cloudPayload.outwardData, dbOut)
+            .map((item, i) => ({ ...item, slNo: i + 1 }));
+          state.filesData = mergeRegisterRecords(local.filesData, cloudPayload.filesData, dbFiles)
+            .map((item, i) => ({ ...item, slNo: i + 1 }));
 
-            if (cloudPayload.authConfig) {
-              const localAuth = getAuthConfig();
-              const mergedAuth = { ...localAuth, ...cloudPayload.authConfig };
-              saveAuthConfig(mergedAuth);
-            }
-
-            localStorage.setItem(STORAGE_KEY, JSON.stringify({
-              departments: state.departments,
-              docTypes: state.docTypes,
-              inwardData: state.inwardData,
-              outwardData: state.outwardData,
-              filesData: state.filesData,
-              sections: state.sections
-            }));
-
-            populateDropdowns();
-            renderAll();
-            renderCharts();
-            lastSync = new Date();
-            updateStatusUI('online');
-            await refreshTableStats();
-
-            if (showToastAlert) {
-              showToast('Pulled latest data from Neon PostgreSQL Cloud successfully!', 'success');
-            }
+          if (cloudPayload.authConfig) {
+            const mergedAuth = { ...getAuthConfig(), ...cloudPayload.authConfig };
+            saveAuthConfig(mergedAuth);
           }
+
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({
+            departments: state.departments, docTypes: state.docTypes,
+            inwardData: state.inwardData, outwardData: state.outwardData,
+            filesData: state.filesData, sections: state.sections
+          }));
+          populateDropdowns();
+          renderAll();
+          renderCharts();
+          lastSync = new Date();
+          updateStatusUI('online');
+          await refreshTableStats();
+
+          // Repair the stale snapshot after recovering records from all storage layers.
+          queueSync();
+          if (showToastAlert) showToast('Cloud registers merged and synchronized successfully.', 'success');
         } catch (err) {
           console.error('Error pulling from cloud:', err);
           updateStatusUI('offline');
-          if (showToastAlert) {
-            showToast(`Failed to pull from cloud: ${err.message}`, 'danger');
-          }
+          if (showToastAlert) showToast(`Failed to pull from cloud: ${err.message}`, 'danger');
         }
       }
 
@@ -5964,8 +5997,12 @@
 
       function queueSync() {
         clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-          pushLocalToCloud(false);
+        debounceTimer = setTimeout(async () => {
+          if (isSyncing) {
+            queueSync();
+            return;
+          }
+          await pushLocalToCloud(false);
         }, 1000);
       }
 
@@ -6087,8 +6124,12 @@
           ]);
           queueSync();
         } catch (err) {
-          console.warn('Upsert outward to cloud failed:', err);
+          console.error('Upsert outward to cloud failed:', err);
+          updateStatusUI('offline');
+          showToast(`Outward record could not be saved to cloud: ${err.message}. The local copy remains in this browser; retry synchronization.`, 'danger');
+          return false;
         }
+        return true;
       }
 
       async function deleteOutward(id) {
@@ -6606,53 +6647,39 @@
       return item ? item.code : (docName.length <= 4 ? docName.toUpperCase() : 'DOC');
     }
 
+    function getNextDocumentSequence(records, direction, deptName, docName) {
+      const deptCode = getDeptCode(deptName).toUpperCase();
+      const docCode = getDocCode(docName).toUpperCase();
+      const fiscalYear = String(state.currentFiscalYear || '').toUpperCase();
+      const expectedPrefix = `JU/OOR/${direction}/`;
+      let maxSeq = 0;
+
+      (Array.isArray(records) ? records : []).forEach(item => {
+        if (!item || !item.refNo) return;
+        const ref = String(item.refNo).trim().toUpperCase();
+        // Only count references in the current canonical format. Legacy JU/RO references
+        // have a different numbering scheme and must not contaminate the new sequences.
+        const match = ref.match(/^JU\/OOR\/(IN|OUT)\/([^/]+)\/([^/]+)\/([^/]+)\/(\d+)$/);
+        if (!match || match[0].slice(0, expectedPrefix.length) !== expectedPrefix) return;
+        if (match[2] !== deptCode || match[3] !== docCode || match[4] !== fiscalYear) return;
+        const seq = Number(match[5]);
+        if (Number.isSafeInteger(seq) && seq > maxSeq) maxSeq = seq;
+      });
+
+      return maxSeq + 1;
+    }
+
     function generateNextInwardRef(deptName, docName) {
       const deptCode = getDeptCode(deptName);
       const docCode = getDocCode(docName);
-      let maxSeq = 0;
-      const source = (state.inwardData && state.inwardData.length > 0) ? state.inwardData : (typeof INITIAL_INWARD_DATA !== 'undefined' ? INITIAL_INWARD_DATA : []);
-      source.forEach(item => {
-        if (item && item.refNo) {
-          const parts = String(item.refNo).trim().split('/');
-          const itemDept = item.deptCode || (parts.length >= 4 ? parts[3] : '');
-          const itemDeptName = item.department || '';
-          const matchDept = (
-            itemDept.toUpperCase() === deptCode.toUpperCase() ||
-            itemDeptName.trim().toLowerCase() === String(deptName).trim().toLowerCase() ||
-            item.refNo.toUpperCase().includes(`/${deptCode.toUpperCase()}/`)
-          );
-          if (matchDept) {
-            const num = parseInt(parts[parts.length - 1], 10);
-            if (!isNaN(num) && num > maxSeq) maxSeq = num;
-          }
-        }
-      });
-      const seq = maxSeq + 1;
+      const seq = getNextDocumentSequence(state.inwardData || INITIAL_INWARD_DATA, 'IN', deptName, docName);
       return `JU/OOR/IN/${deptCode}/${docCode}/${state.currentFiscalYear}/${padZero(seq)}`;
     }
 
     function generateNextOutwardRef(deptName, docName) {
       const deptCode = getDeptCode(deptName);
       const docCode = getDocCode(docName);
-      let maxSeq = 0;
-      const source = (state.outwardData && state.outwardData.length > 0) ? state.outwardData : (typeof INITIAL_OUTWARD_DATA !== 'undefined' ? INITIAL_OUTWARD_DATA : []);
-      source.forEach(item => {
-        if (item && item.refNo) {
-          const parts = String(item.refNo).trim().split('/');
-          const itemDept = item.deptCode || (parts.length >= 4 ? parts[3] : '');
-          const itemDeptName = item.department || '';
-          const matchDept = (
-            itemDept.toUpperCase() === deptCode.toUpperCase() ||
-            itemDeptName.trim().toLowerCase() === String(deptName).trim().toLowerCase() ||
-            item.refNo.toUpperCase().includes(`/${deptCode.toUpperCase()}/`)
-          );
-          if (matchDept) {
-            const num = parseInt(parts[parts.length - 1], 10);
-            if (!isNaN(num) && num > maxSeq) maxSeq = num;
-          }
-        }
-      });
-      const seq = maxSeq + 1;
+      const seq = getNextDocumentSequence(state.outwardData || INITIAL_OUTWARD_DATA, 'OUT', deptName, docName);
       return `JU/OOR/OUT/${deptCode}/${docCode}/${state.currentFiscalYear}/${padZero(seq)}`;
     }
 
