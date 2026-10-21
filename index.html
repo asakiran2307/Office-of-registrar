@@ -2088,6 +2088,10 @@
             <span>Official Circular</span>
           </button>
 
+          <button class="btn btn-secondary" id="cloud-backup-download-btn" title="Download the latest automatically saved cloud Excel backup">
+            <span>Download Cloud Backup</span>
+          </button>
+
           <button class="btn btn-secondary" id="export-excel-btn" title="Export complete multi-sheet Excel workbook">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -6002,6 +6006,45 @@
         }, 1000);
       }
 
+      async function saveExcelBackup(base64, filename, counts = {}) {
+        try {
+          await executeSql(`CREATE TABLE IF NOT EXISTS ju_excel_backups (
+            id BIGSERIAL PRIMARY KEY,
+            filename TEXT NOT NULL,
+            workbook_base64 TEXT NOT NULL,
+            record_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );`);
+          await executeSql(`INSERT INTO ju_excel_backups (filename, workbook_base64, record_counts)
+            VALUES ($1, $2, $3::jsonb);`, [filename, base64, JSON.stringify(counts)]);
+          await executeSql(`DELETE FROM ju_excel_backups WHERE id NOT IN
+            (SELECT id FROM ju_excel_backups ORDER BY created_at DESC, id DESC LIMIT 20);`);
+          return true;
+        } catch (err) {
+          console.error('Cloud Excel backup write failed:', err);
+          updateStatusUI('offline');
+          return false;
+        }
+      }
+
+      async function downloadLatestExcelBackup() {
+        try {
+          const rows = await executeSql(`SELECT filename, workbook_base64, created_at
+            FROM ju_excel_backups ORDER BY created_at DESC, id DESC LIMIT 1;`);
+          if (!rows.length) { showToast('No cloud Excel backup exists yet. Save a record or use Export Excel first.', 'warning'); return false; }
+          const row = rows[0];
+          const binary = atob(row.workbook_base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = row.filename || 'Joy_University_OOR_Backup.xlsx';
+          document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+          showToast('Latest cloud Excel backup downloaded.', 'success');
+          return true;
+        } catch (err) { showToast('Could not download cloud Excel backup: ' + err.message, 'danger'); return false; }
+      }
+
       async function upsertInward(item) {
         try {
           await executeSql(`
@@ -6270,6 +6313,8 @@
       }
 
       return {
+        saveExcelBackup,
+        downloadLatestExcelBackup,
         init,
         executeSql,
         pullCloudToLocal,
@@ -6363,6 +6408,26 @@
       saveData();
     }
 
+    let excelBackupTimer = null;
+    function scheduleExcelBackup() {
+      clearTimeout(excelBackupTimer);
+      excelBackupTimer = setTimeout(async () => {
+        try {
+          if (!window.JU_DB || typeof XLSX === 'undefined') return;
+          const base64 = exportFullWorkbook(false);
+          if (!base64) return;
+          const filename = `Joy_University_OOR_Backup_${new Date().toISOString().replace(/[:.]/g, '-')}.xlsx`;
+          const ok = await window.JU_DB.saveExcelBackup(base64, filename, {
+            inward: state.inwardData.length,
+            outward: state.outwardData.length,
+            files: (state.filesData || []).length
+          });
+          if (ok) console.info('Excel cloud backup saved:', filename);
+          else console.error('Excel cloud backup was not confirmed.');
+        } catch (err) { console.error('Automatic Excel backup failed:', err); }
+      }, 5000);
+    }
+
     function saveData() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         departments: state.departments,
@@ -6374,6 +6439,7 @@
       }));
       updateBadges();
       if (window.JU_DB) window.JU_DB.queueSync();
+      scheduleExcelBackup();
     }
 
     function initTheme() {
@@ -6569,6 +6635,7 @@
 
       // Export Buttons (Manual user-triggered exports)
       document.getElementById('export-excel-btn')?.addEventListener('click', exportFullWorkbook);
+      document.getElementById('cloud-backup-download-btn')?.addEventListener('click', () => window.JU_DB?.downloadLatestExcelBackup());
       document.getElementById('export-inward-excel-btn')?.addEventListener('click', () => exportSingleTable('inward'));
       document.getElementById('export-outward-excel-btn')?.addEventListener('click', () => exportSingleTable('outward'));
       document.getElementById('reset-data-btn')?.addEventListener('click', handleResetData);
@@ -8361,7 +8428,7 @@
       reader.readAsArrayBuffer(file);
     }
 
-    function exportFullWorkbook() {
+    function exportFullWorkbook(download = true) {
       if (typeof XLSX === 'undefined') {
         showToast('SheetJS Excel library is loading...', 'warning');
         return;
@@ -8478,8 +8545,10 @@
       XLSX.utils.book_append_sheet(wb, wsSections, 'Guidance_NAAC');
 
       const filename = `Joy_University_OOR_INWARD_OUTWARD_REGISTER_${new Date().toISOString().split('T')[0]}.xlsx`;
+      if (!download) return XLSX.write(wb, { bookType: 'xlsx', type: 'base64', compression: true });
       XLSX.writeFile(wb, filename);
       showToast(`Exported complete multi-sheet register workbook: ${filename}`, 'success');
+      return true;
     }
 
     function exportSingleTable(type) {
