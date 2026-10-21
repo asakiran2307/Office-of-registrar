@@ -7374,7 +7374,10 @@
       saveData();
       const cloudSaved = window.JU_DB ? await window.JU_DB.upsertFile(newFile) : false;
       if (!cloudSaved) {
-        showToast('Cloud save failed. The record is not confirmed as permanently saved. Please retry when the database is online.', 'danger');
+        state.filesData = (state.filesData || []).filter(item => item.id !== newFile.id);
+        saveData();
+        renderAll();
+        showToast('Cloud save failed. Your form remains open; the record was not marked as saved. Check the database connection and retry.', 'danger');
         return;
       }
       renderAll();
@@ -7993,7 +7996,11 @@
       saveData();
       const cloudSaved = window.JU_DB ? await window.JU_DB.upsertInward(newRecord) : false;
       if (!cloudSaved) {
-        showToast('Cloud save failed. The record is not confirmed as permanently saved. Please retry when the database is online.', 'danger');
+        state.inwardData = (state.inwardData || []).filter(item => item.id !== newRecord.id);
+        saveData();
+        renderAll();
+        renderCharts();
+        showToast('Cloud save failed. Your form remains open; the record was not marked as saved. Check the database connection and retry.', 'danger');
         return;
       }
       renderAll();
@@ -8055,7 +8062,11 @@
       saveData();
       const cloudSaved = window.JU_DB ? await window.JU_DB.upsertOutward(newRecord) : false;
       if (!cloudSaved) {
-        showToast('Cloud save failed. The record is not confirmed as permanently saved. Please retry when the database is online.', 'danger');
+        state.outwardData = (state.outwardData || []).filter(item => item.id !== newRecord.id);
+        saveData();
+        renderAll();
+        renderCharts();
+        showToast('Cloud save failed. Your form remains open; the record was not marked as saved. Check the database connection and retry.', 'danger');
         return;
       }
       renderAll();
