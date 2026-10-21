@@ -5717,8 +5717,6 @@
        Neon PostgreSQL Cloud Database Engine (Dual-Tier Real-Time Sync)
        ========================================================================== */
     const JU_DB = (function() {
-      const NEON_CONN_STR = "postgresql://neondb_owner:npg_Z1XQUFT0YhBI@ep-delicate-mountain-adckue32-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require";
-      const NEON_ENDPOINT = "https://ep-delicate-mountain-adckue32-pooler.c-2.us-east-1.aws.neon.tech/sql";
 
       let status = 'connecting'; // 'online', 'offline', 'syncing', 'error'
       let latency = null;
@@ -5731,12 +5729,10 @@
         const payload = { query: sql };
         if (params && params.length > 0) payload.params = params;
 
-        const response = await fetch(NEON_ENDPOINT, {
+        // Keep the Neon connection string server-side; the browser calls the API proxy.
+        const response = await fetch('/api/db', {
           method: 'POST',
-          headers: {
-            'Neon-Connection-String': NEON_CONN_STR,
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
 
@@ -6052,8 +6048,11 @@
           ]);
           queueSync();
         } catch (err) {
-          console.warn('Upsert inward to cloud failed:', err);
+          console.error('Upsert inward to cloud failed:', err);
+          updateStatusUI('offline');
+          return false;
         }
+        return true;
       }
 
       async function deleteInward(id) {
@@ -6192,8 +6191,11 @@
           ]);
           queueSync();
         } catch (err) {
-          console.warn('Upsert file to cloud failed:', err);
+          console.error('Upsert file to cloud failed:', err);
+          updateStatusUI('offline');
+          return false;
         }
+        return true;
       }
 
       async function deleteFile(id) {
@@ -7327,7 +7329,7 @@
       `;
     }
 
-    function handleFileSubmit(e) {
+    async function handleFileSubmit(e) {
       e.preventDefault();
       const catCode = document.getElementById('file-cat-select').value;
       const cat = getFileCategory(catCode);
@@ -7370,13 +7372,17 @@
       state.filesData.forEach((item, i) => item.slNo = i + 1);
 
       saveData();
-      if (window.JU_DB) window.JU_DB.upsertFile(newFile);
+      const cloudSaved = window.JU_DB ? await window.JU_DB.upsertFile(newFile) : false;
+      if (!cloudSaved) {
+        showToast('Cloud save failed. The record is not confirmed as permanently saved. Please retry when the database is online.', 'danger');
+        return;
+      }
       renderAll();
       closeModal('file-modal');
       e.target.reset();
 
       showToast(
-        `Master File registered: ${refNo} (Indexed & synchronized for AR & Staff)`,
+        `Master File saved to cloud: ${refNo}`,
         'success'
       );
     }
@@ -7947,7 +7953,7 @@
       `).join('');
     }
 
-    function handleInwardSubmit(e) {
+    async function handleInwardSubmit(e) {
       e.preventDefault();
       const dept = document.getElementById('in-dept-select').value;
       const doc = document.getElementById('in-doc-select').value;
@@ -7985,19 +7991,23 @@
       state.inwardData.forEach((item, i) => item.slNo = i + 1);
 
       saveData();
-      if (window.JU_DB) window.JU_DB.upsertInward(newRecord);
+      const cloudSaved = window.JU_DB ? await window.JU_DB.upsertInward(newRecord) : false;
+      if (!cloudSaved) {
+        showToast('Cloud save failed. The record is not confirmed as permanently saved. Please retry when the database is online.', 'danger');
+        return;
+      }
       renderAll();
       renderCharts();
       closeModal('inward-modal');
       e.target.reset();
 
       showToast(
-        `Inward entry registered: ${refNo} (Saved to website & synchronized for AR & Staff)`,
+        `Inward entry saved to cloud: ${refNo}`,
         'success'
       );
     }
 
-    function handleOutwardSubmit(e) {
+    async function handleOutwardSubmit(e) {
       e.preventDefault();
       const dept = document.getElementById('out-dept-select').value;
       const doc = document.getElementById('out-doc-select').value;
@@ -8043,7 +8053,11 @@
       state.outwardData.forEach((item, i) => item.slNo = i + 1);
 
       saveData();
-      if (window.JU_DB) window.JU_DB.upsertOutward(newRecord);
+      const cloudSaved = window.JU_DB ? await window.JU_DB.upsertOutward(newRecord) : false;
+      if (!cloudSaved) {
+        showToast('Cloud save failed. The record is not confirmed as permanently saved. Please retry when the database is online.', 'danger');
+        return;
+      }
       renderAll();
       renderCharts();
       closeModal('outward-modal');
