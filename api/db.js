@@ -1,80 +1,62 @@
-// Vercel Serverless Function: Neon PostgreSQL Database Gateway
-const NEON_CONN_STR = process.env.DATABASE_URL || "postgresql://neondb_owner:npg_Z1XQUFT0YhBI@ep-delicate-mountain-adckue32-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require";
+// Server-side Neon PostgreSQL gateway. DATABASE_URL must be configured in Vercel.
+const NEON_CONN_STR = process.env.DATABASE_URL;
 const NEON_SQL_ENDPOINT = "https://ep-delicate-mountain-adckue32-pooler.c-2.us-east-1.aws.neon.tech/sql";
+const ALLOWED_ORIGINS = new Set([
+  "https://registraroffice.vercel.app",
+  "https://registraroffice-blue-screen-wizards.vercel.app",
+  "https://registraroffice-git-main-blue-screen-wizards.vercel.app"
+]);
 
 module.exports = async (req, res) => {
-  // CORS Headers
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const origin = req.headers.origin;
+  if (origin && !ALLOWED_ORIGINS.has(origin)) {
+    return res.status(403).json({ error: "Origin not allowed" });
+  }
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Neon-Connection-String");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (!NEON_CONN_STR) {
+    return res.status(503).json({ error: "Database is not configured. Set DATABASE_URL in Vercel." });
   }
 
   if (req.method === "GET") {
-    // Health check and table counts
     try {
       const resp = await fetch(NEON_SQL_ENDPOINT, {
         method: "POST",
-        headers: {
-          "Neon-Connection-String": NEON_CONN_STR,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          query: `
-            SELECT 
-              (SELECT count(*) FROM ju_inward) AS inward_count,
-              (SELECT count(*) FROM ju_outward) AS outward_count,
-              (SELECT count(*) FROM ju_files) AS files_count,
-              (SELECT count(*) FROM ju_departments) AS dept_count,
-              (SELECT count(*) FROM ju_doc_types) AS doc_count,
-              (SELECT count(*) FROM ju_sections) AS section_count,
-              (SELECT count(*) FROM ju_auth) AS auth_count,
-              NOW() AS server_time;
-          `
-        })
+        headers: { "Neon-Connection-String": NEON_CONN_STR, "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "SELECT NOW() AS server_time;" })
       });
       const data = await resp.json();
-      return res.status(200).json({
-        status: "online",
-        database: "neondb",
-        provider: "Neon PostgreSQL",
-        endpoint: NEON_SQL_ENDPOINT,
-        stats: data.rows && data.rows[0] ? data.rows[0] : null
-      });
+      if (!resp.ok) return res.status(resp.status).json({ error: "Database health check failed" });
+      return res.status(200).json({ status: "online", database: "Neon PostgreSQL", serverTime: data.rows?.[0]?.server_time || null });
     } catch (err) {
-      return res.status(500).json({ status: "error", message: err.message });
+      return res.status(500).json({ error: "Database connection failed" });
     }
   }
 
-  if (req.method === "POST") {
-    try {
-      const { query, params } = req.body || {};
-      if (!query) {
-        return res.status(400).json({ error: "Missing query parameter" });
-      }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-      const bodyPayload = { query };
-      if (params && Array.isArray(params)) {
-        bodyPayload.params = params;
-      }
-
-      const resp = await fetch(NEON_SQL_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Neon-Connection-String": NEON_CONN_STR,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(bodyPayload)
-      });
-
-      const data = await resp.json();
-      return res.status(resp.status).json(data);
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
+  try {
+    const { query, params } = req.body || {};
+    if (typeof query !== "string" || !query.trim() || query.length > 30000) {
+      return res.status(400).json({ error: "Invalid query" });
     }
+    if (params !== undefined && !Array.isArray(params)) {
+      return res.status(400).json({ error: "Invalid query parameters" });
+    }
+    const resp = await fetch(NEON_SQL_ENDPOINT, {
+      method: "POST",
+      headers: { "Neon-Connection-String": NEON_CONN_STR, "Content-Type": "application/json" },
+      body: JSON.stringify({ query, ...(params ? { params } : {}) })
+    });
+    const data = await resp.json();
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(500).json({ error: "Database request failed" });
   }
-
-  return res.status(405).json({ error: "Method not allowed" });
 };
